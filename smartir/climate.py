@@ -7,9 +7,9 @@ import voluptuous as vol
 
 from homeassistant.components.climate import ClimateDevice, PLATFORM_SCHEMA
 from homeassistant.components.climate.const import (
-    STATE_HEAT, STATE_COOL, STATE_AUTO, STATE_DRY,
+    STATE_HEAT, STATE_COOL, STATE_AUTO, STATE_DRY, STATE_FAN_ONLY,
     SUPPORT_OPERATION_MODE, SUPPORT_TARGET_TEMPERATURE, SUPPORT_FAN_MODE,
-    SUPPORT_ON_OFF)
+    SUPPORT_ON_OFF, SUPPORT_SWING_MODE, ATTR_SWING_MODE)
 from homeassistant.const import (
     CONF_NAME, STATE_OFF, STATE_ON, STATE_UNKNOWN, ATTR_TEMPERATURE,
     PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE)
@@ -35,7 +35,8 @@ SUPPORT_FLAGS = (
     SUPPORT_TARGET_TEMPERATURE | 
     SUPPORT_OPERATION_MODE | 
     SUPPORT_FAN_MODE | 
-    SUPPORT_ON_OFF
+    SUPPORT_ON_OFF | 
+    SUPPORT_SWING_MODE
 )
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -108,11 +109,14 @@ class SmartIRClimate(ClimateDevice, RestoreEntity):
         self._precision = device_data['precision']
         self._operation_modes = [STATE_OFF] + device_data['operationModes']
         self._fan_modes = device_data['fanModes']
+        self._swing_modes = [STATE_OFF, STATE_ON]
         self._commands = device_data['commands']
 
         self._target_temperature = self._min_temperature
         self._current_operation = STATE_OFF
         self._current_fan_mode = self._fan_modes[0]
+        self._current_swing_mode = STATE_OFF
+        self._wanted_swing_mode = STATE_OFF
         self._last_on_operation = None
 
         self._current_temperature = None
@@ -141,6 +145,8 @@ class SmartIRClimate(ClimateDevice, RestoreEntity):
             self._target_temperature = last_state.attributes['temperature']
             self._current_operation = last_state.attributes['operation_mode']
             self._current_fan_mode = last_state.attributes['fan_mode']
+            self._current_swing_mode = last_state.attributes['swing_mode']
+            self._wanted_swing_mode = last_state.attributes['swing_mode']
 
             if 'last_on_operation' in last_state.attributes:
                 self._last_on_operation = last_state.attributes['last_on_operation']
@@ -235,6 +241,16 @@ class SmartIRClimate(ClimateDevice, RestoreEntity):
         return self._current_fan_mode
 
     @property
+    def swing_list(self):
+        """Return the list of available swing modes."""
+        return self._swing_modes
+
+    @property
+    def current_swing_mode(self):
+        """Return the swing setting."""
+        return self._current_swing_mode
+
+    @property
     def current_temperature(self):
         """Return the current temperature."""
         return self._current_temperature
@@ -303,8 +319,22 @@ class SmartIRClimate(ClimateDevice, RestoreEntity):
             await self.send_command()      
         await self.async_update_ha_state()
 
+    async def async_set_swing_mode(self, swing_mode):
+        """Set swing mode."""
+        self._wanted_swing_mode = swing_mode
+        
+        # if ac is off then ignore changes to swing mode
+        if not self._current_operation.lower() == STATE_OFF:
+            # only send_command if mode changed - otherwise will toggle mode unnecessarily
+            if not self._current_swing_mode == self._wanted_swing_mode:
+                await self.send_command()
+        await self.async_update_ha_state()
+
     async def async_turn_off(self):
         """Turn off."""
+        # convention: when (my) AC will be turned on - swing will always be off
+        self._current_swing_mode = STATE_OFF
+        self._wanted_swing_mode = STATE_OFF
         await self.async_set_operation_mode(STATE_OFF)
         
     async def async_turn_on(self):
@@ -324,7 +354,11 @@ class SmartIRClimate(ClimateDevice, RestoreEntity):
             if operation_mode.lower() == STATE_OFF:
                 command = self._commands['off']
             else:
-                command = self._commands[operation_mode][fan_mode][target_temperature]
+                if not self._current_swing_mode == self._wanted_swing_mode:
+                    command = self._commands['swingtoggle']
+                    self._current_swing_mode = self._wanted_swing_mode
+                else:
+                    command = self._commands[operation_mode][fan_mode][target_temperature]
 
             try:
                 await self._controller.send(command)
